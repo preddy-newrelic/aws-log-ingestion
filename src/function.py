@@ -43,6 +43,7 @@ import re
 from base64 import b64decode
 from enum import Enum
 from urllib import request
+import random
 
 import aiohttp
 import asyncio
@@ -114,6 +115,109 @@ class MaxRetriesException(Exception):
 
 class BadRequestException(Exception):
     pass
+
+
+class LogLineSampler(object):
+    """Encapsulates all of the configured sampling rules to perform on lines from a single log file.
+
+    It contains a list of filters, specified as regular expressions and a corresponding pass rate
+    (a number between 0 and 1 inclusive) for each filter.  When a line is processed, each filter
+    regular expression is matched against the line in order.  If a expression matches any portion of the
+    line, then its pass rate is used to determine if that line should be included in the output.  A random number
+    is generated and if it is greater than the filter's pass rate, then the line is included.  The first filter that
+    matches a line is used.
+
+    Copied and modified from https://github.com/scalyr/scalyr-agent-2/blob/master/scalyr_agent/log_processing.py
+    Any non-trivial changes to the above should be reflected here.
+    TODO: Have a common library for this code
+    """
+
+    def __init__(self):
+        """Initializes an instance."""
+        self.__sampling_rules = []
+        self.total_passes = 0
+
+    def process_line(self, input_line):
+        """Performs all configured sampling operations on the input line and returns whether or not it should
+        be kept.  If it should be kept, then a float is returned indicating the sampling rate of the rule that
+        allowed it to be included.  Otherwise, None.
+
+        See the class description for the algorithm that determines which lines are returned.
+
+        @param input_line: The input line.
+
+        @return: A float between 0 and 1 if the input line should be kept, the sampling rate of the rule that allowed
+            it to be included.  Otherwise, None.
+        """
+
+        if len(self.__sampling_rules) == 0:
+            self.total_passes += 1
+            return 1.0
+
+        sampling_rule = self.__find_first_match(input_line)
+        if sampling_rule is None:
+            return 1.0
+        else:
+            sampling_rule.total_matches += 1
+            if self.__flip_biased_coin(sampling_rule.sampling_rate):
+                sampling_rule.total_passes += 1
+                self.total_passes += 1
+                return sampling_rule.sampling_rate
+        return None
+
+    def add_rule(self, match_expression, sample_rate):
+        """Appends a new sampling rule.  Any line that contains a match for match expression will be sampled with
+        the specified rate.
+
+        @param match_expression: The regular expression that much match any part of a line to activie the rule.
+        @param sample_rate: The sampling rate, expressed as a number between 0 and 1 inclusive.
+        """
+        self.__sampling_rules.append(SamplingRule(match_expression, sample_rate))
+
+    def __find_first_match(self, line):
+        """Returns the first sampling rule to match the line, if any.
+
+        @param line: The input line to match against.
+
+        @return: The first sampling rule to match any portion of line.  If none
+            match, then returns None.
+        """
+        for sampling_rule in self.__sampling_rules:
+            if sampling_rule.match_expression.search(line) is not None:
+                return sampling_rule
+        return None
+
+    def __flip_biased_coin(self, bias):
+        """Flip a biased coin and return True if it comes up head.
+
+        @param bias: The probability the coin will come up heads.
+        @type bias: float
+        @return:  True if it comes up heads.
+        @rtype: bool
+        """
+        if bias == 0:
+            return False
+        elif bias == 1:
+            return True
+        else:
+            return self._get_next_random() < bias
+
+    def _get_next_random(self):
+        """Returns a random between 0 and 1 inclusive.
+
+        This is used for testing.
+        """
+        return random.random()
+
+
+class SamplingRule(object):
+    """Encapsulates all data for one sampling rule."""
+
+    def __init__(self, match_expression, sampling_rate):
+        self.match_expression = re.compile(match_expression, flags=re.UNICODE)
+        self.sampling_rate = sampling_rate
+        self.total_matches = 0
+        self.total_passes = 0
 
 
 async def http_post(session, url, data, headers):
@@ -416,7 +520,16 @@ def _package_log_payload(data):
     log_messages = []
     lambda_request_id = None
 
+    sampler = LogLineSampler()
+    for rule in os.getenv("sampling_rules", {}):
+        sampler.add_rule(rule["match_expression"], float(rule["sampling_rate"]))
+
     for log_event in log_events:
+        # TODO: to fix issue
+        # Perform log manipulation here
+        if not sampler.process_line(log_event["message"]):
+            continue
+
         log_message = {
             "message": log_event["message"],
             "timestamp": log_event["timestamp"],
