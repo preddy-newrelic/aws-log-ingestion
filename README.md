@@ -42,3 +42,16 @@ Additional notes:
 Additional notes:
 
 * To set `LOGGING_ENABLED`: `export LOGGING_ENABLED=True` (prior to deploy)
+
+
+### Sampling Rules
+
+Set the `SAMPLING_OPTIONS`: `{
+     "sampling_rules": [
+       { "match_expression": "INFO", "sampling_rate": 0.1 },
+       { "match_expression": "FINE", "sampling_rate": 0 },
+	   { "match_expression": "DEBUG", "sampling_rate": 0.4 }
+     ]
+}`
+
+Update `match_expression` and `sampling_rate` to suit your use case.
