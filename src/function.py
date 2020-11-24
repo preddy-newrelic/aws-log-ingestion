@@ -73,6 +73,9 @@ MAX_PAYLOAD_SIZE = 1000 * 1024
 LAMBDA_LOG_GROUP_PREFIX = "/aws/lambda"
 VPC_LOG_GROUP_PREFIX = "/aws/vpc/flow-logs"
 
+NR_Sampling_Options = os.environ.get('NRSamplingOptions', '{}')
+NR_Sampling_Options = json.loads(NR_Sampling_Options)
+
 LAMBDA_NR_MONITORING_PATTERN = re.compile(r'.*"NR_LAMBDA_MONITORING')
 REPORT_PATTERN = re.compile("REPORT RequestId:")
 TIMEOUT_PATTERN = re.compile(
@@ -218,6 +221,20 @@ class SamplingRule(object):
         self.sampling_rate = sampling_rate
         self.total_matches = 0
         self.total_passes = 0
+
+
+def get_sampling_options(log_group):
+    """Attempts to match the logGroup from the CloudWatch Logs message to the JSON object
+    (LOG_GROUP_OPTIONS) provided in the Lambda environment using a regex full-match on the
+    name of the logGroup
+
+    @param log_group: The name of the logGroup from the CloudWatch Logs message
+    @type log_group: str
+
+    @return: An empty dict or a dict of options used to customise the request to the uploadLogs API
+    @rtype: dict
+    """
+    return NR_Sampling_Options
 
 
 async def http_post(session, url, data, headers):
@@ -520,12 +537,13 @@ def _package_log_payload(data):
     log_messages = []
     lambda_request_id = None
 
+    sampling_options = get_sampling_options(entry['logGroup'])
     sampler = LogLineSampler()
-    for rule in os.getenv("sampling_rules", {}):
+
+    for rule in sampling_options.get('sampling_rules', {}):
         sampler.add_rule(rule["match_expression"], float(rule["sampling_rate"]))
 
     for log_event in log_events:
-        # TODO: to fix issue
         # Perform log manipulation here
         if not sampler.process_line(log_event["message"]):
             continue
